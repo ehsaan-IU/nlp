@@ -471,11 +471,11 @@ async function startServer() {
                         console.log('Using Groq API for response...');
 
                         // RAG: Retrieve relevant context with lower similarity threshold for better matching
-                        const ragResult = retrieveRelevantContext(message, businessData, 1, 0.6);
+                        const ragResult = retrieveRelevantContext(message, businessData, 1, 0.1);
                         let contextString = '';
                         
                         // Check if similarity score is too low
-                        if (ragResult.maxScore < 0.6) {
+                        if (ragResult.maxScore < 0.1) {
                             botResponse = `I don't have specific information about that. Please contact us directly at ${businessData.config?.contact?.phone || 'our phone number'} for assistance.`;
                         } else if (ragResult.contexts.length > 0) {
                             contextString = `Relevant info: ${ragResult.contexts.join('\n')}`;
@@ -496,7 +496,7 @@ async function startServer() {
                             console.log('Making request to Groq API...');
 
                             const requestBody = {
-                                model: 'llama3-8b-8192',  // Using Llama 3 8B model, fast and efficient
+                                model: 'llama-3.3-70b-versatile',  // Using Llama 3 8B model, fast and efficient
                                 messages: messages,
                                 max_tokens: 150,  // Reduced for concise responses
                                 temperature: 0.2  // Lower temperature for more consistent responses

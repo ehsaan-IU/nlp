@@ -1,0 +1,55 @@
+{
+  "business": {
+    "name": "DEWENZO FRAGRANCES",
+    "type": "perfumes",
+    "industry": "perfume",
+    "location": "karachi,pk",
+    "founded": "2024",
+    "specialization": "perfumes"
+  },
+  "chatbot": {
+    "personality": "Professional, friendly, and knowledgeable about cleaning services",
+    "tone": "Helpful, informative, and customer-focused",
+    "expertise": "perfumes",
+    "greeting": "Hi! Welcome to DEWENZO FRAGRANCES. How can we help you today?",
+    "fallback": "We're here to help. What would you like to know about our services, pricing?"
+  },
+  "services": {
+    "primary": [
+      "perfumes"
+    ],
+    "specialties": [
+      "good perfumes"
+    ]
+  },
+  "contact": {
+    "phone": "(03) 9850-5333",
+    "email": "ehsan@bawany.com",
+    "address": "P.O. Box 2435, Templestowe Lower, VIC 3107",
+    "hours": "Monday-Friday: 08:00-18:00, Saturday & Sunday: Closed"
+  },
+  "service_areas": [
+    "earth"
+  ],
+  "certifications": [
+    "ACCI",
+    "Wools of New Zealand",
+    "IICRC"
+  ],
+  "pricing_keywords": [
+    "free written quotes",
+    "competitive pricing",
+    "transparent pricing",
+    "no hidden costs"
+  ],
+  "common_questions": [
+    "What are your operating hours?",
+    "Do you service my area?",
+    "Are your products safe for pets and children?",
+    "Do you provide free quotes?",
+    "What certifications do you have?"
+  ],
+  "keywords": [
+    "perfumes"
+  ]
+} 

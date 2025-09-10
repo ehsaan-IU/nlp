@@ -1,0 +1,39 @@
+:root {
+  /* Primary Colors */
+  --primary-color: #ad7133;
+  --primary-hover: #bd8d5b;
+  --secondary-color: #4A90E2;
+  
+  /* Text Colors */
+  --text-color: #1A1A1A;
+  --text-light: #666666;
+  
+  /* Background Colors */
+  --bg-color: #FFFFFF;
+  --bg-light: #F5F5F5;
+  --bg-medium: #E0E0E0;
+  
+  /* Border Colors */
+  --border-color: #CCCCCC;
+  
+  /* Chat Colors */
+  --chat-bg: #FFFFFF;
+  --chat-user-bg: #ad7133;
+  --chat-user-text: #FFFFFF;
+  --chat-bot-bg: #F5F5F5;
+  --chat-bot-text: #1A1A1A;
+  
+  /* Font Settings */
+  --font-family: 'Arial', sans-serif;
+  --font-size-base: 16px;
+  
+  /* Button Styles */
+  --button-radius: 50px;
+  --button-padding: 1.2rem 2.8rem;
+  
+  /* Chat Widget */
+  --widget-icon-color: #FFFFFF;
+  --widget-bg-color: #ad7133;
+  --widget-size: 60px;
+  --widget-radius: 50%;
+}

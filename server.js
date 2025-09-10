@@ -1,923 +1,1013 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fetch = require('node-fetch');
+const fs = require('fs');
+const natural = require('natural');
+const multer = require('multer');
+const pdfParse = require('pdf-parse');
+const fsExtra = require('fs-extra');
 
-// Import configurations and services
-const appConfig = require('./config/app');
-const databaseConfig = require('./config/database');
-const businessService = require('./services/BusinessService');
-const aiService = require('./services/AIService');
-const ragService = require('./services/RAGService');
+// Load environment variables
+require('dotenv').config();
 
-class ChatbotServer {
-    constructor() {
-        this.app = express();
-        this.setupMiddleware();
-        this.setupRoutes();
-        this.setupErrorHandling();
+const app = express();
+const PORT = process.env.PORT || 3002;
+
+// Business cache to improve performance
+const businessCache = new Map();
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        // Get business ID from request
+        const businessId = req.query.business || 'default';
         
-        console.log('🤖 ChatBot Server initialized');
-    }
-
-    setupMiddleware() {
-        this.app.use(express.json({ limit: '10mb' }));
-        this.app.use(express.urlencoded({ extended: true }));
-        this.app.use(cors({
-            origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
-            methods: ['GET', 'POST', 'PUT', 'DELETE'],
-            allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-Id']
-        }));
-
-        // Request logging
-        if (appConfig.isDevelopment()) {
-            this.app.use((req, res, next) => {
-                console.log(`📡 ${req.method} ${req.path} - ${new Date().toISOString()}`);
-                next();
-            });
+        // Create business uploads directory if it doesn't exist
+        const businessUploadsDir = path.join(__dirname, 'businesses', businessId, 'uploads');
+        if (!fs.existsSync(businessUploadsDir)) {
+            fs.mkdirSync(businessUploadsDir, { recursive: true });
         }
+        
+        cb(null, businessUploadsDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, file.fieldname + '-' + uniqueSuffix + '.pdf');
     }
+});
 
-    setupRoutes() {
-        // Health check
-        this.app.get('/api/health', this.healthCheck.bind(this));
-        
-        // Main chat endpoint
-        this.app.post('/api/chat', this.handleChat.bind(this));
-        
-        // Initial message endpoint
-        this.app.get('/api/initial-message', this.getInitialMessage.bind(this));
-        
-        // Business management endpoints
-        this.app.get('/api/businesses', this.getAllBusinesses.bind(this));
-        this.app.get('/api/business/:id', this.getBusinessDetails.bind(this));
-        this.app.post('/api/business/:id/cache/clear', this.clearBusinessCache.bind(this));
-        
-        // Debug endpoints
-        this.app.get('/api/debug/knowledge-base', this.debugKnowledgeBase.bind(this));
-        this.app.post('/api/debug/test-rag', this.testRAG.bind(this));
-        this.app.get('/api/debug/stats', this.getDebugStats.bind(this));
-        
-        // Admin endpoints
-        this.app.post('/api/admin/cache/clear', this.clearAllCache.bind(this));
-        this.app.get('/api/admin/sessions', this.getActiveSessions.bind(this));
-
-        // Widget endpoints
-        this.app.get('/widget/chatbot.js', this.serveWidgetScript.bind(this));
-        this.app.get('/widget/embed/:businessId', this.serveEmbedScript.bind(this));
-        this.app.get('/widget/demo/:businessId?', this.serveDemo.bind(this));
-
-        // Widget configuration endpoint 
-        this.app.get('/api/widget/config/:businessId', this.getWidgetConfig.bind(this));
-        this.app.post('/api/widget/config/:businessId', this.saveWidgetConfig.bind(this));
-
-        
-        
-        // 404 handler
-        this.app.use('*', (req, res) => {
-            res.status(404).json({ 
-                error: 'Endpoint not found',
-                available_endpoints: [
-                    'GET /api/health',
-                    'POST /api/chat',
-                    'GET /api/initial-message',
-                    'GET /api/businesses'
-                ]
-            });
-        });
-    }
-
-    async serveWidgetScript(req, res) {
-    try {
-        const fs = require('fs');
-        const path = require('path');
-        
-        // Try to serve from public directory first
-        const publicScriptPath = path.join(__dirname, 'public', 'chatbot-widget.js');
-        
-        if (fs.existsSync(publicScriptPath)) {
-            res.setHeader('Content-Type', 'application/javascript');
-            res.setHeader('Cache-Control', 'public, max-age=3600');
-            res.sendFile(publicScriptPath);
+const upload = multer({ 
+    storage: storage,
+    fileFilter: function (req, file, cb) {
+        if (file.mimetype === 'application/pdf') {
+            cb(null, true);
         } else {
-            // Fallback - serve inline widget script
-            const widgetScript = this.getInlineWidgetScript();
-            res.setHeader('Content-Type', 'application/javascript');
-            res.setHeader('Cache-Control', 'no-cache');
-            res.send(widgetScript);
+            cb(new Error('Only PDF files are allowed!'), false);
         }
-    } catch (error) {
-        console.error('❌ Widget script error:', error);
-        res.status(500).json({ error: 'Failed to serve widget script' });
+    },
+    limits: {
+        fileSize: 10 * 1024 * 1024 // 10MB limit
     }
-}
+});
 
-getInlineWidgetScript() {
-    // Basic inline widget script as fallback
-    return `
-// Chatbot Widget Fallback Script
-(function() {
-    console.log('Loading chatbot widget...');
-    
-    // Create a simple fallback widget
-    const widget = document.createElement('div');
-    widget.innerHTML = \`
-        <div style="position: fixed; bottom: 20px; right: 20px; z-index: 9999;">
-            <div style="background: #007bff; color: white; padding: 15px; border-radius: 50px; cursor: pointer; box-shadow: 0 4px 20px rgba(0,0,0,0.2);" onclick="alert('Chatbot widget loaded! Please add chatbot-widget.js to public/ directory for full functionality.')">
-                💬 Chat
-            </div>
-        </div>
-    \`;
-    document.body.appendChild(widget);
-    
-    console.warn('Chatbot widget fallback loaded. Add chatbot-widget.js to public/ directory for full functionality.');
-})();
-    `;
-}
+// Middleware
+app.use(express.json());
+app.use(cors());
+app.use(express.static(path.join(__dirname)));
+app.use('/public', express.static(path.join(__dirname, 'public')));
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-async serveEmbedScript(req, res) {
+// API configuration
+// IMPORTANT: Replace this with your actual API key from Groq
+const GROQ_API_KEY = process.env.GROQ_API_KEY || "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"; 
+
+// Function to get business configuration
+async function getBusinessConfig(businessId) {
+    // Check cache first
+    if (businessCache.has(businessId)) {
+        return businessCache.get(businessId);
+    }
+    
+    // Business directory path
+    const businessDir = path.join(__dirname, 'businesses', businessId);
+    
+    // Check if business directory exists
+    if (!fs.existsSync(businessDir)) {
+        console.warn(`⚠️ Business directory not found: ${businessId}`);
+        return null;
+    }
+    
     try {
-        const businessId = req.params.businessId;
+        // Load business configuration
+        const configPath = path.join(businessDir, 'config.json');
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
         
-        if (!businessId) {
-            return res.status(400).json({ error: 'Business ID is required' });
+        // Load knowledge base if it exists
+        let knowledgeBase = [];
+        const knowledgeBasePath = path.join(businessDir, 'knowledge_base.json');
+        if (fs.existsSync(knowledgeBasePath)) {
+            knowledgeBase = JSON.parse(fs.readFileSync(knowledgeBasePath, 'utf8'));
         }
-
-        // Verify business exists
-        const businessData = await businessService.getBusinessConfig(businessId);
-        if (!businessData) {
-            return res.status(404).json({ error: 'Business not found' });
-        }
-
-        const embedScript = this.generateEmbedScript(businessId);
         
-        res.setHeader('Content-Type', 'application/javascript');
-        res.setHeader('Cache-Control', 'public, max-age=3600');
-        res.send(embedScript);
-        
-    } catch (error) {
-        console.error('❌ Embed script error:', error);
-        res.status(500).json({ error: 'Failed to serve embed script' });
-    }
-}
-
-generateEmbedScript(businessId) {
-    const serverUrl = process.env.SERVER_URL || `http://localhost:${appConfig.server.port}`;
-    
-    return `
-// Chatbot Embed Script for Business: ${businessId}
-(function() {
-    const CHATBOT_CONFIG = {
-        businessId: '${businessId}',
-        serverUrl: '${serverUrl}',
-        apiEndpoint: '${serverUrl}/api/chat',
-        initialMessageEndpoint: '${serverUrl}/api/initial-message'
-    };
-
-    // Create chatbot container
-    const chatbotContainer = document.createElement('div');
-    chatbotContainer.id = 'chatbot-container-${businessId}';
-    chatbotContainer.innerHTML = \`
-        <div id="chatbot-widget" style="
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            width: 350px;
-            height: 500px;
-            background: white;
-            border-radius: 10px;
-            box-shadow: 0 5px 30px rgba(0,0,0,0.3);
-            z-index: 9999;
-            display: none;
-            flex-direction: column;
-        ">
-            <div id="chatbot-header" style="
-                background: #007bff;
-                color: white;
-                padding: 15px;
-                border-radius: 10px 10px 0 0;
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-            ">
-                <h3 style="margin: 0; font-size: 16px;">Chat Support</h3>
-                <button id="close-chatbot" style="
-                    background: none;
-                    border: none;
-                    color: white;
-                    font-size: 18px;
-                    cursor: pointer;
-                ">×</button>
-            </div>
-            <div id="chatbot-messages" style="
-                flex: 1;
-                padding: 15px;
-                overflow-y: auto;
-                max-height: 350px;
-            ">
-                <div class="message bot-message" style="
-                    margin-bottom: 10px;
-                    padding: 10px;
-                    background: #f1f1f1;
-                    border-radius: 10px;
-                ">
-                    <div class="message-text">Loading...</div>
-                </div>
-            </div>
-            <div id="chatbot-input-area" style="
-                padding: 15px;
-                border-top: 1px solid #eee;
-            ">
-                <div style="display: flex; gap: 10px;">
-                    <input type="text" id="chatbot-input" placeholder="Type your message..." style="
-                        flex: 1;
-                        padding: 10px;
-                        border: 1px solid #ddd;
-                        border-radius: 5px;
-                        outline: none;
-                    ">
-                    <button id="send-message" style="
-                        background: #007bff;
-                        color: white;
-                        border: none;
-                        padding: 10px 15px;
-                        border-radius: 5px;
-                        cursor: pointer;
-                    ">Send</button>
-                </div>
-            </div>
-        </div>
-        
-        <div id="chatbot-toggle" style="
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            width: 60px;
-            height: 60px;
-            background: #007bff;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-            z-index: 9999;
-        ">
-            <span style="color: white; font-size: 24px;">💬</span>
-        </div>
-    \`;
-
-    document.body.appendChild(chatbotContainer);
-
-    // Initialize chatbot functionality
-    let sessionId = null;
-    const widget = document.getElementById('chatbot-widget');
-    const toggle = document.getElementById('chatbot-toggle');
-    const closeBtn = document.getElementById('close-chatbot');
-    const input = document.getElementById('chatbot-input');
-    const sendBtn = document.getElementById('send-message');
-    const messagesContainer = document.getElementById('chatbot-messages');
-
-    // Generate session ID
-    sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-
-    // Toggle widget
-    toggle.addEventListener('click', () => {
-        widget.style.display = widget.style.display === 'none' ? 'flex' : 'none';
-        if (widget.style.display === 'flex') {
-            loadInitialMessage();
-        }
-    });
-
-    closeBtn.addEventListener('click', () => {
-        widget.style.display = 'none';
-    });
-
-    // Send message functionality
-    function sendMessage() {
-        const message = input.value.trim();
-        if (!message) return;
-
-        addMessage(message, 'user');
-        input.value = '';
-
-        // Send to API
-        fetch(CHATBOT_CONFIG.apiEndpoint + '?business=' + CHATBOT_CONFIG.businessId, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-Session-Id': sessionId
-            },
-            body: JSON.stringify({ message: message })
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.response) {
-                addMessage(data.response, 'bot');
-            } else {
-                addMessage('Sorry, I couldn\\'t process your message. Please try again.', 'bot');
-            }
-        })
-        .catch(error => {
-            console.error('Chatbot error:', error);
-            addMessage('Sorry, something went wrong. Please try again later.', 'bot');
+        // Prepare TF-IDF for this business
+        const TfIdf = natural.TfIdf;
+        const tfidf = new TfIdf();
+        knowledgeBase.forEach((entry, idx) => {
+            tfidf.addDocument(entry.question + ' ' + entry.answer, idx.toString());
         });
-    }
-
-    function addMessage(text, sender) {
-        const messageDiv = document.createElement('div');
-        messageDiv.className = \`message \${sender}-message\`;
-        messageDiv.style.cssText = \`
-            margin-bottom: 10px;
-            padding: 10px;
-            border-radius: 10px;
-            \${sender === 'user' ? 
-                'background: #007bff; color: white; margin-left: 20px;' : 
-                'background: #f1f1f1; margin-right: 20px;'
-            }
-        \`;
-        messageDiv.innerHTML = \`<div class="message-text">\${text}</div>\`;
-        messagesContainer.appendChild(messageDiv);
-        messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    }
-
-    function loadInitialMessage() {
-        fetch(CHATBOT_CONFIG.initialMessageEndpoint + '?business=' + CHATBOT_CONFIG.businessId)
-        .then(response => response.json())
-        .then(data => {
-            messagesContainer.innerHTML = '';
-            addMessage(data.message || 'Hello! How can I help you today?', 'bot');
-        })
-        .catch(error => {
-            console.error('Initial message error:', error);
-            messagesContainer.innerHTML = '';
-            addMessage('Hello! How can I help you today?', 'bot');
-        });
-    }
-
-    // Event listeners
-    sendBtn.addEventListener('click', sendMessage);
-    input.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') {
-            sendMessage();
-        }
-    });
-
-    console.log('Chatbot embed loaded for business:', CHATBOT_CONFIG.businessId);
-})();
-    `;
-}
-
-async serveDemo(req, res) {
-    try {
-        const businessId = req.params.businessId || 'default';
         
-        // Get business data for demo
-        const businessData = await businessService.getBusinessConfig(businessId);
-        const businessName = businessData?.config?.business?.name || 'Demo Business';
-        
-        const demoHTML = this.generateDemoHTML(businessId, businessName);
-        
-        res.setHeader('Content-Type', 'text/html');
-        res.send(demoHTML);
-        
-    } catch (error) {
-        console.error('❌ Demo page error:', error);
-        res.status(500).send('<h1>Error loading demo page</h1>');
-    }
-}
+        // Create business data object
+        const businessData = {
+            config,
+            knowledgeBase,
+            tfidf,
+            systemMessage: config.chatbot?.system_message || `You are ${config.business?.name || 'Yako'}, a professional business AI assistant representing ${config.business?.name || 'our company'}.
 
-generateDemoHTML(businessId, businessName) {
-    const serverUrl = process.env.SERVER_URL || `http://localhost:${appConfig.server.port}`;
-    
-    return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chatbot Demo - ${businessName}</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-        }
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-        }
-        h1 {
-            color: #333;
-            text-align: center;
-            margin-bottom: 10px;
-        }
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 30px;
-        }
-        .info-box {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            border-left: 4px solid #007bff;
-        }
-        .demo-instructions {
-            background: #e3f2fd;
-            padding: 15px;
-            border-radius: 8px;
-            margin: 20px 0;
-        }
-        .code-snippet {
-            background: #f4f4f4;
-            padding: 15px;
-            border-radius: 5px;
-            font-family: monospace;
-            overflow-x: auto;
-            margin: 10px 0;
-        }
-        .btn {
-            display: inline-block;
-            padding: 10px 20px;
-            background: #007bff;
-            color: white;
-            text-decoration: none;
-            border-radius: 5px;
-            margin: 5px;
-        }
-        .btn:hover {
-            background: #0056b3;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Chatbot Demo</h1>
-        <p class="subtitle">Business: <strong>${businessName}</strong> (ID: ${businessId})</p>
-        
-        <div class="info-box">
-            <h3>📋 Demo Information</h3>
-            <p><strong>Business ID:</strong> ${businessId}</p>
-            <p><strong>Server URL:</strong> ${serverUrl}</p>
-            <p><strong>Status:</strong> <span style="color: green;">Active</span></p>
-        </div>
+RESPONSE FORMATTING GUIDELINES:
+- Use proper headings (##) and subheadings (###) to organize information
+- Structure responses with bullet points (•) for lists and key features
+- Use numbered lists (1., 2., 3.) for steps or sequential information
+- Format prices and important details with **bold text**
+- Use smaller, professional font styling for better readability
+- Organize information in logical sections with clear separation
 
-        <div class="demo-instructions">
-            <h3>🚀 How to Test</h3>
-            <p>Click the chat button in the bottom-right corner to start chatting with the AI assistant!</p>
-            <p>The chatbot will load the specific configuration and knowledge base for <strong>${businessName}</strong>.</p>
-        </div>
+RESPONSE CONTENT GUIDELINES:
+- Provide concise, professional answers (2-3 sentences maximum)
+- Maintain formal business tone with consistent formatting
+- Focus exclusively on business information, products, services, pricing, policies, and procedures
+- Use "We" and "Our" (company voice) consistently
+- Provide complete, actionable information in brief format
+- Use professional language without excessive emojis
 
-        <div class="info-box">
-            <h3>🔧 Integration Code</h3>
-            <p>To embed this chatbot on your website, add this script tag:</p>
-            <div class="code-snippet">
-&lt;script src="${serverUrl}/widget/embed/${businessId}"&gt;&lt;/script&gt;
-            </div>
-        </div>
+TOPIC RESTRICTIONS:
+- ONLY address questions about ${config.business?.name || 'our business'} products, services, pricing, policies, location, contact information, delivery, shipping, and business operations
+- For off-topic questions, professionally redirect: "I'm here to assist with ${config.business?.name || 'our business'} information. How can I help you with our products or services?"
+- If similarity score is below 0.6, respond: "I don't have specific information about that. Please contact us directly at ${config.contact?.phone || 'our phone number'} for assistance."
 
-        <div class="info-box">
-            <h3>📡 API Endpoints</h3>
-            <p><strong>Chat API:</strong> <code>POST ${serverUrl}/api/chat?business=${businessId}</code></p>
-            <p><strong>Initial Message:</strong> <code>GET ${serverUrl}/api/initial-message?business=${businessId}</code></p>
-            <p><strong>Widget Config:</strong> <code>GET ${serverUrl}/api/widget/config/${businessId}</code></p>
-        </div>
-
-        <div style="text-align: center; margin: 30px 0;">
-            <a href="${serverUrl}/api/health" class="btn" target="_blank">🔍 Health Check</a>
-            <a href="${serverUrl}/api/businesses" class="btn" target="_blank">📋 All Businesses</a>
-            <a href="${serverUrl}/api/debug/knowledge-base?business=${businessId}" class="btn" target="_blank">🧠 Knowledge Base</a>
-        </div>
-    </div>
-
-    <!-- Load the chatbot widget -->
-    <script src="${serverUrl}/widget/embed/${businessId}"></script>
-</body>
-</html>
-    `;
-}
-
-async getWidgetConfig(req, res) {
-    try {
-        const businessId = req.params.businessId;
-        
-        // Get business data
-        const businessData = await businessService.getBusinessConfig(businessId);
-        if (!businessData) {
-            return res.status(404).json({ error: 'Business not found' });
-        }
-
-        // Return widget configuration
-        const config = {
-            businessId: businessId,
-            businessName: businessData.config.business.name,
-            theme: businessData.config.widget?.theme || 'default',
-            position: businessData.config.widget?.position || 'bottom-right',
-            welcomeMessage: businessData.initialMessage,
-            apiEndpoints: {
-                chat: `/api/chat?business=${businessId}`,
-                initialMessage: `/api/initial-message?business=${businessId}`
-            }
+CONVERSATION FLOW:
+- Maintain professional context throughout conversation
+- Provide structured, business-focused responses with proper formatting
+- Redirect irrelevant questions professionally and courteously`,
+            initialMessage: config.chatbot?.initial_message || `Welcome to ${config.business?.name || 'our business'}. How can we assist you today?`
         };
-
-        res.json(config);
-    } catch (error) {
-        console.error('❌ Widget config error:', error);
-        res.status(500).json({ error: 'Failed to get widget config' });
+        
+        // Cache the business data
+        businessCache.set(businessId, businessData);
+        
+        console.log(`✅ Loaded business configuration for: ${businessData.config.business?.name || 'Unknown Business'}`);
+        return businessData;
+    } catch (e) {
+        console.error(`❌ Error loading business configuration for ${businessId}:`, e.message);
+        return null;
     }
 }
 
-async saveWidgetConfig(req, res) {
-    try {
-        const businessId = req.params.businessId;
-        const { theme, position, welcomeMessage } = req.body;
-        
-        // This would typically save to database
-        // For now, just return success
-        res.json({
-            message: 'Widget configuration saved',
-            businessId: businessId,
-            config: { theme, position, welcomeMessage }
-        });
-    } catch (error) {
-        console.error('❌ Save widget config error:', error);
-        res.status(500).json({ error: 'Failed to save widget config' });
+// Store conversation history
+const conversationHistory = new Map();
+
+// Simple response patterns as fallback
+const fallbackResponses = [
+    "How can we assist you further?",
+    "What would you like to know about our products?",
+    "How can we help you with our services?",
+    "What else would you like to discuss?",
+    "How can we assist you today?",
+    "What would you like to explore next?",
+    "Is there anything specific we can help with?",
+    "How can we better serve you?"
+];
+
+// Check if a message is relevant to the business
+function isMessageRelevant(message = '', conversationHistory = [], businessConfig = {}) {
+    const lowerMessage = message.toLowerCase();
+    
+    // Enhanced classification for off-topic questions
+    const isOffTopicQuestion = 
+        // General knowledge questions
+        /what.*capital.*of/i.test(lowerMessage) ||
+        /capital.*of.*what/i.test(lowerMessage) ||
+        /tell.*me.*capital/i.test(lowerMessage) ||
+        /who.*founded/i.test(lowerMessage) ||
+        /when.*war/i.test(lowerMessage) ||
+        /what.*year/i.test(lowerMessage) ||
+        /what.*element/i.test(lowerMessage) ||
+        /how.*many.*planets/i.test(lowerMessage) ||
+        /what.*temperature/i.test(lowerMessage) ||
+        /what.*country/i.test(lowerMessage) ||
+        /where.*located/i.test(lowerMessage) ||
+        /what.*continent/i.test(lowerMessage) ||
+        /what.*square root/i.test(lowerMessage) ||
+        /what.*percentage/i.test(lowerMessage) ||
+        /what.*formula/i.test(lowerMessage) ||
+        /what.*population/i.test(lowerMessage) ||
+        /who.*invented/i.test(lowerMessage) ||
+        /what.*language/i.test(lowerMessage) ||
+        /what.*currency/i.test(lowerMessage) ||
+        // Entertainment and pop culture
+        /who.*actor/i.test(lowerMessage) ||
+        /what.*movie/i.test(lowerMessage) ||
+        /who.*singer/i.test(lowerMessage) ||
+        /what.*song/i.test(lowerMessage) ||
+        /who.*celebrity/i.test(lowerMessage) ||
+        // Sports questions
+        /who.*won.*game/i.test(lowerMessage) ||
+        /what.*score/i.test(lowerMessage) ||
+        /who.*team/i.test(lowerMessage) ||
+        // Personal questions
+        /how.*old.*are.*you/i.test(lowerMessage) ||
+        /what.*your.*favorite/i.test(lowerMessage) ||
+        /do.*you.*like/i.test(lowerMessage) ||
+        /what.*your.*hobby/i.test(lowerMessage) ||
+        // Philosophical questions
+        /what.*meaning.*life/i.test(lowerMessage) ||
+        /why.*exist/i.test(lowerMessage) ||
+        /what.*purpose/i.test(lowerMessage) ||
+        // Technical questions not related to business
+        /how.*computer.*work/i.test(lowerMessage) ||
+        /what.*programming.*language/i.test(lowerMessage) ||
+        /how.*internet.*work/i.test(lowerMessage);
+    
+    // If it's an off-topic question, it's NOT relevant
+    if (isOffTopicQuestion) {
+        return false;
     }
+    
+    // Check against business keywords
+    const businessKeywords = businessConfig.config?.keywords || [];
+    const hasBusinessKeyword = businessKeywords.some(keyword => 
+        lowerMessage.includes(keyword.toLowerCase())
+    );
+    
+    // Check for business name, type, or specialization
+    const hasBusinessReference = 
+        lowerMessage.includes(businessConfig.config?.business?.name?.toLowerCase() || '') ||
+        lowerMessage.includes(businessConfig.config?.business?.type?.toLowerCase() || '') ||
+        lowerMessage.includes(businessConfig.config?.business?.specialization?.toLowerCase() || '');
+    
+    // Check for common business-related terms
+    const hasBusinessTerms = 
+        lowerMessage.includes('service') ||
+        lowerMessage.includes('price') ||
+        lowerMessage.includes('cost') ||
+        lowerMessage.includes('quote') ||
+        lowerMessage.includes('contact') ||
+        lowerMessage.includes('phone') ||
+        lowerMessage.includes('email') ||
+        lowerMessage.includes('hour') ||
+        lowerMessage.includes('time') ||
+        lowerMessage.includes('schedule') ||
+        lowerMessage.includes('booking') ||
+        lowerMessage.includes('appointment') ||
+        lowerMessage.includes('deliver') ||
+        lowerMessage.includes('delivery') ||
+        lowerMessage.includes('ship') ||
+        lowerMessage.includes('shipping') ||
+        lowerMessage.includes('location') ||
+        lowerMessage.includes('city') ||
+        lowerMessage.includes('area');
+    
+    // Check for common business question patterns
+    const hasBusinessQuestionPattern = 
+        /what.*are.*(the|your).*(hours|timings|services|prices|costs|rates)/i.test(lowerMessage) ||
+        /what.*are.*(the|your).*(operating|business|working).*(hours|times)/i.test(lowerMessage) ||
+        /when.*are.*you.*open/i.test(lowerMessage) ||
+        /what.*do.*you.*offer/i.test(lowerMessage) ||
+        /how.*much.*do.*you.*charge/i.test(lowerMessage) ||
+        /what.*are.*your.*rates/i.test(lowerMessage);
+    
+    // Check for conversation flow indicators (always relevant)
+    const isConversationFlow = 
+        lowerMessage.includes('what about') ||
+        lowerMessage.includes('tell me more') ||
+        lowerMessage.includes('can you explain') ||
+        lowerMessage.includes('how does') ||
+        lowerMessage.includes('why') ||
+        lowerMessage.includes('when') ||
+        lowerMessage.includes('where') ||
+        lowerMessage.includes('which');
+    
+    // Check for basic conversation starters (allow these)
+    const isConversationStarter = 
+        lowerMessage.includes('hello') ||
+        lowerMessage.includes('hi') ||
+        lowerMessage.includes('help') ||
+        lowerMessage.includes('bye') ||
+        lowerMessage.includes('goodbye') ||
+        lowerMessage.includes('how are you');
+    
+    // If this is a follow-up question and we have conversation history, be more lenient
+    const hasConversationHistory = conversationHistory.length > 0;
+    const isShortMessage = lowerMessage.length < 20;
+    const isFollowUpQuestion = hasConversationHistory && (isShortMessage || isConversationFlow);
+    
+    return hasBusinessKeyword || hasBusinessReference || hasBusinessTerms || hasBusinessQuestionPattern || isConversationStarter || isFollowUpQuestion;
 }
 
-async getThemes(req, res) {
-    try {
-        const businessId = req.params.businessId;
-        
-        // Return available themes
-        const themes = [
-            {
-                id: 'default',
-                name: 'Default Blue',
-                colors: {
-                    primary: '#007bff',
-                    secondary: '#6c757d',
-                    background: '#ffffff'
-                }
-            },
-            {
-                id: 'light',
-                name: 'Dark Mode',
-                colors: {
-                    primary: '#28a745',
-                    secondary: '#343a40',
-                    background: '#212529'
-                }
-            },
-            {
-                id: 'purple',
-                name: 'Purple Theme',
-                colors: {
-                    primary: '#6f42c1',
-                    secondary: '#6c757d',
-                    background: '#ffffff'
-                }
-            }
+// Smart fallback based on message content
+function getSmartFallback(message = '', conversationHistory = [], businessConfig = {}) {
+    const lowerMessage = message.toLowerCase();
+    
+    // Check if message is relevant to the business
+    const isRelevant = isMessageRelevant(message, conversationHistory, businessConfig);
+    
+    // If not relevant, redirect to business topics
+    if (!isRelevant) {
+        const redirectResponses = [
+            `I'm here to help you with information about ${businessConfig.config?.business?.name || 'our business'} and our products. For general knowledge questions, I recommend using a search engine or an encyclopedia.`,
+            `I'm here to assist you with questions about ${businessConfig.config?.business?.name || 'our business'} and our products. For general knowledge questions such as this, I recommend using a search engine or encyclopedia.`,
+            `We'd be happy to help with questions about ${businessConfig.config?.business?.name || 'our services'}! What would you like to know about our business?`,
+            `We're here to assist with ${businessConfig.config?.business?.type || 'our services'}. Is there anything specific about our business you'd like to know?`,
+            `We focus on helping customers with ${businessConfig.config?.business?.specialization || 'our services'}. How can we assist you with that?`
         ];
-
-        res.json({ themes, businessId });
-    } catch (error) {
-        console.error('❌ Get themes error:', error);
-        res.status(500).json({ error: 'Failed to get themes' });
+        return redirectResponses[Math.floor(Math.random() * redirectResponses.length)];
+    }
+    
+    // Business-specific responses
+    if (lowerMessage.includes('hello') || lowerMessage.includes('hi')) {
+        return businessConfig.config?.chatbot?.greeting || "Hello! How can we assist you today?";
+    } else if (lowerMessage.includes('how are you')) {
+        return "We're doing well, thank you. How can we assist you with our products?";
+    } else if (lowerMessage.includes('what') && lowerMessage.includes('name')) {
+        return `We're ${businessConfig.config?.business?.name || 'Yako'}, your business assistant. How can we help you?`;
+    } else if (lowerMessage.includes('help')) {
+        return "What would you like assistance with regarding our products or services?";
+    } else if (lowerMessage.includes('bye') || lowerMessage.includes('goodbye')) {
+        return "Thank you for your interest. Have a great day!";
+    } else if (lowerMessage.includes('service') || lowerMessage.includes('area')) {
+        const areas = businessConfig.config?.service_areas?.slice(0, 3).join(', ') || 'our service areas';
+        return `We service ${areas} and surrounding areas. How can we assist you?`;
+    } else if (lowerMessage.includes('price') || lowerMessage.includes('cost') || lowerMessage.includes('quote')) {
+        return `We offer competitive pricing with free quotes. Would you like pricing information?`;
+    } else if (lowerMessage.includes('contact') || lowerMessage.includes('phone') || lowerMessage.includes('email')) {
+        const contact = businessConfig.config?.contact;
+        return `Contact us at ${contact?.phone || 'our phone number'} or ${contact?.email || 'our email'}. Business hours: ${contact?.hours || 'Monday-Friday'}.`;
+    } else if (lowerMessage.includes('hour') || lowerMessage.includes('time')) {
+        return `Our business hours are ${businessConfig.config?.contact?.hours || 'Monday-Friday'}. When would you like to schedule?`;
+    } else {
+        return businessConfig.config?.chatbot?.fallback || fallbackResponses[Math.floor(Math.random() * fallbackResponses.length)];
     }
 }
 
-
-    setupErrorHandling() {
-        this.app.use((error, req, res, next) => {
-            console.error('❌ Server error:', error);
-            
-            res.status(error.status || 500).json({
-                error: appConfig.isDevelopment() ? error.message : 'Internal server error',
-                timestamp: new Date().toISOString(),
-                path: req.path
-            });
-        });
+function retrieveRelevantContext(query, businessData, topK = 1, similarityThreshold = 0.6) {
+    if (!businessData.knowledgeBase.length) return { contexts: [], maxScore: 0 };
+    
+    const scores = [];
+    businessData.tfidf.tfidfs(query, (i, measure) => {
+        scores.push({ idx: i, score: measure });
+    });
+    
+    scores.sort((a, b) => b.score - a.score);
+    const maxScore = scores.length > 0 ? scores[0].score : 0;
+    
+    // Only return contexts if similarity score meets threshold
+    if (maxScore < similarityThreshold) {
+        return { contexts: [], maxScore };
     }
+    
+    const top = scores.slice(0, topK).filter(s => s.score >= similarityThreshold);
+    return { 
+        contexts: top.map(s => businessData.knowledgeBase[s.idx].answer),
+        maxScore: maxScore
+    };
+}
 
-    // Route handlers
-    async healthCheck(req, res) {
-        try {
-            const dbHealth = await businessService.healthCheck();
-            const aiStats = aiService.getStats();
-            
-            res.json({
-                status: 'ok',
-                timestamp: new Date().toISOString(),
-                uptime: process.uptime(),
-                version: process.env.npm_package_version || '1.0.0',
-                environment: appConfig.server.nodeEnv,
-                services: {
-                    database: dbHealth,
-                    ai: aiStats
-                }
-            });
-        } catch (error) {
-            res.status(503).json({
-                status: 'error',
-                error: error.message
-            });
-        }
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+    res.json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Widget file endpoint
+app.get('/public/chatbot-widget.js', (req, res) => {
+    const widgetPath = path.join(__dirname, 'public', 'chatbot-widget.js');
+    if (fs.existsSync(widgetPath)) {
+        res.setHeader('Content-Type', 'application/javascript');
+        res.sendFile(widgetPath);
+    } else {
+        res.status(404).json({ error: 'Widget file not found' });
     }
+});
 
-    async handleChat(req, res) {
+// Business theme endpoint
+app.get('/api/business-theme', (req, res) => {
+    const businessId = req.query.business || 'default';
+    const themePath = path.join(__dirname, 'businesses', businessId, 'theme.css');
+    
+    if (fs.existsSync(themePath)) {
+        res.setHeader('Content-Type', 'text/css');
+        res.sendFile(themePath);
+    } else {
+        // Send default theme if business theme doesn't exist
+        res.setHeader('Content-Type', 'text/css');
+        res.sendFile(path.join(__dirname, 'styles.css'));
+    }
+});
+
+// Business config endpoint
+app.get('/api/business-config', async (req, res) => {
+    const businessId = req.query.business || 'default';
+    const businessData = await getBusinessConfig(businessId);
+    
+    if (businessData) {
+        res.json(businessData.config);
+    } else {
+        res.status(404).json({ error: 'Business not found' });
+    }
+});
+
+// Start server
+async function startServer() {
+    console.log('🤖 Starting AI Chatbot Server...');
+    
+    // Chat endpoint
+    app.post('/api/chat', async (req, res) => {
         try {
             const { message } = req.body;
-            const businessId = req.query.business || req.body.business_id || 'default';
-            const sessionId = req.headers['x-session-id'] || `${businessId}_${Date.now()}`;
-
-            // Validation
+            const businessId = req.query.business || 'default';
+            
             if (!message || message.trim() === '') {
                 return res.status(400).json({ error: 'Message is required' });
             }
-
-            if (message.length > 1000) {
-                return res.status(400).json({ error: 'Message too long (max 1000 characters)' });
-            }
-
-            console.log(`📨 Chat request - Business: ${businessId}, Session: ${sessionId}`);
-            console.log(`📝 Message: "${message}"`);
-
+            
+            console.log(`Received message for business ${businessId}:`, message);
+            
             // Get business configuration
-            const businessData = await businessService.getBusinessConfig(businessId);
-            if (!businessData) {
-                return res.status(404).json({ 
-                    error: 'Business not found',
-                    business_id: businessId 
-                });
-            }
-
-            // Generate AI response
-            const fullSessionId = `${businessId}_${sessionId}`;
-            const result = await aiService.generateResponse(message, businessData, fullSessionId);
-
-            console.log(`✅ Response generated for ${businessId}:`, result.response.substring(0, 100));
-
-            res.json({
-                ...result,
-                business_id: businessId,
-                session_id: sessionId,
-                timestamp: new Date().toISOString()
-            });
-
-        } catch (error) {
-            console.error('❌ Chat error:', error);
-            res.status(500).json({
-                error: 'Failed to process message',
-                details: appConfig.isDevelopment() ? error.message : undefined,
-                suggestions: ['hey you there?', 'can you try again?', 'what happened?']
-            });
-        }
-    }
-
-    async getInitialMessage(req, res) {
-        try {
-            const businessId = req.query.business || 'default';
-            const businessData = await businessService.getBusinessConfig(businessId);
-
-            const defaultSuggestions = [
-                'hey what\'s up?', 
-                'how\'s your day going?', 
-                'you free to chat?'
-            ];
-
-            if (businessData) {
-                res.json({
-                    message: businessData.initialMessage,
-                    business_name: businessData.config.business.name,
-                    suggestions: defaultSuggestions,
-                    business_id: businessId
-                });
-            } else {
-                res.json({ 
-                    message: 'hey! what\'s up?', 
-                    suggestions: defaultSuggestions,
-                    business_id: businessId
-                });
-            }
-        } catch (error) {
-            console.error('❌ Initial message error:', error);
-            res.status(500).json({ error: 'Failed to get initial message' });
-        }
-    }
-
-    async getAllBusinesses(req, res) {
-        try {
-            const businesses = await businessService.getAllBusinesses();
-            res.json({
-                businesses,
-                total: businesses.length,
-                timestamp: new Date().toISOString()
-            });
-        } catch (error) {
-            console.error('❌ Get businesses error:', error);
-            res.status(500).json({ error: 'Failed to fetch businesses' });
-        }
-    }
-
-    async getBusinessDetails(req, res) {
-        try {
-            const businessId = req.params.id;
-            const businessData = await businessService.getBusinessConfig(businessId);
-            
+            const businessData = await getBusinessConfig(businessId);
             if (!businessData) {
                 return res.status(404).json({ error: 'Business not found' });
             }
 
-            // Remove sensitive data
-            const publicData = {
-                config: businessData.config,
-                knowledge_base_count: businessData.knowledgeBase.length,
-                categories: [...new Set(businessData.knowledgeBase.map(kb => kb.category))],
-                last_updated: new Date().toISOString()
-            };
-
-            res.json(publicData);
-        } catch (error) {
-            console.error('❌ Get business details error:', error);
-            res.status(500).json({ error: 'Failed to get business details' });
-        }
-    }
-
-    async clearBusinessCache(req, res) {
-        try {
-            const businessId = req.params.id;
-            businessService.clearCache(businessId);
+            // Get conversation history
+            const sessionId = `${businessId}_${req.headers['x-session-id'] || 'default'}`;
+            let history = conversationHistory.get(sessionId) || [];
             
-            res.json({
-                message: `Cache cleared for business: ${businessId}`,
-                timestamp: new Date().toISOString()
+            // Check if this is a new conversation (no history yet)
+            const isNewConversation = history.length === 0;
+            
+            if (isNewConversation) {
+                console.log('New conversation started, will include initial message in response');
+            }
+            
+            // Add user message to history
+            history.push({ role: 'user', content: message });
+            
+            let botResponse;
+            
+            try {
+                // Handle common queries with rule-based system first for faster response
+                const lowerMessage = message.toLowerCase();
+                
+                if (/^(what\s+is\s+)?2\s*\+\s*2(\s*=\s*)?$/i.test(lowerMessage)) {
+                    botResponse = "2 + 2 = 4";
+                } 
+                else if (/what.*time|current time/i.test(lowerMessage)) {
+                    botResponse = `The current time is ${new Date().toLocaleTimeString()}.`;
+                } 
+                else if (/what.*date|today.*date|current date/i.test(lowerMessage)) {
+                    botResponse = `Today's date is ${new Date().toLocaleDateString()}.`;
+                }
+                else if (/\d+\s*\+\s*\d+/.test(lowerMessage)) {
+                    // Addition
+                    const numbers = lowerMessage.match(/(\d+)\s*\+\s*(\d+)/);
+                    if (numbers && numbers.length >= 3) {
+                        const result = parseInt(numbers[1]) + parseInt(numbers[2]);
+                        botResponse = `${numbers[1]} + ${numbers[2]} = ${result}`;
+                    }
+                }
+                else if (GROQ_API_KEY) {
+                    // Check if message is relevant before using AI (consider conversation context)
+                    if (!isMessageRelevant(message, history, businessData)) {
+                        const redirectResponses = [
+                            `I'm here to help with ${businessData.config?.business?.name || 'our business'} information. How can I assist you with our services?`,
+                            `We focus on ${businessData.config?.business?.name || 'our business'} services. What would you like to know about us?`,
+                            `I'm here to help with ${businessData.config?.business?.name || 'our business'} questions. How can I assist you?`
+                        ];
+                        botResponse = redirectResponses[Math.floor(Math.random() * redirectResponses.length)];
+                    } else {
+                        // If no rule matches and we have an API key, use Groq
+                        console.log('Using Groq API for response...');
+
+                        // RAG: Retrieve relevant context with lower similarity threshold for better matching
+                        const ragResult = retrieveRelevantContext(message, businessData, 1, 0.6);
+                        let contextString = '';
+                        
+                        // Check if similarity score is too low
+                        if (ragResult.maxScore < 0.6) {
+                            botResponse = `I don't have specific information about that. Please contact us directly at ${businessData.config?.contact?.phone || 'our phone number'} for assistance.`;
+                        } else if (ragResult.contexts.length > 0) {
+                            contextString = `Relevant info: ${ragResult.contexts.join('\n')}`;
+                        }
+
+                        if (!botResponse) {
+                            // Prepare the conversation history for Groq
+                            const messages = [
+                                { role: 'system', content: businessData.systemMessage },
+                            ];
+                            if (contextString) {
+                                messages.push({ role: 'system', content: contextString });
+                            }
+                            // Include up to 10 recent messages for context
+                            messages.push(...history.slice(-10));
+
+                            // Call Groq API
+                            console.log('Making request to Groq API...');
+
+                            const requestBody = {
+                                model: 'llama3-8b-8192',  // Using Llama 3 8B model, fast and efficient
+                                messages: messages,
+                                max_tokens: 150,  // Reduced for concise responses
+                                temperature: 0.2  // Lower temperature for more consistent responses
+                            };
+                            
+                            const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                                method: 'POST',
+                                headers: {
+                                    'Authorization': `Bearer ${GROQ_API_KEY}`,
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify(requestBody)
+                            });
+                            
+                            if (groqResponse.ok) {
+                                const data = await groqResponse.json();
+                                
+                                if (data && data.choices && data.choices.length > 0 && data.choices[0].message) {
+                                    botResponse = data.choices[0].message.content.trim();
+                                    console.log('✅ Groq API response received');
+                                } else {
+                                    console.error('Unexpected response format:', data);
+                                    throw new Error('Invalid response format from Groq API');
+                                }
+                            } else {
+                                console.error('API response not ok:', groqResponse.status);
+                                let errorText = '';
+                                
+                                try {
+                                    const errorData = await groqResponse.json();
+                                    console.error('API error details:', errorData);
+                                    errorText = JSON.stringify(errorData);
+                                } catch (e) {
+                                    errorText = await groqResponse.text().catch(() => 'Could not get error details');
+                                    console.error('API error text:', errorText);
+                                }
+                                
+                                if (groqResponse.status === 401) {
+                                    throw new Error(`Groq API error: Authentication failed. Please check your API key. Details: ${errorText}`);
+                                } else {
+                                    throw new Error(`Groq API error (${groqResponse.status}): ${errorText}`);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // No API key, use fallback
+                    console.log('⚠️ No Groq API key available, using fallback');
+                    botResponse = getSmartFallback(message, history, businessData);
+                }
+                
+                console.log('Bot response:', botResponse);
+                
+            } catch (error) {
+                console.error('❌ Error generating response:', error.message);
+                // Use fallback if all methods fail
+                botResponse = getSmartFallback(message, history, businessData);
+            }
+            
+            // Add bot response to history and store
+            history.push({ role: 'assistant', content: botResponse });
+            
+            // Keep history manageable
+            if (history.length > 20) {
+                history = history.slice(-20);
+            }
+            
+            conversationHistory.set(sessionId, history);
+            
+            res.json({ 
+                response: botResponse,
+                isNewConversation: isNewConversation,
+                initialMessage: isNewConversation ? businessData.initialMessage : null
             });
+
         } catch (error) {
-            res.status(500).json({ error: 'Failed to clear cache' });
-        }
-    }
-
-    async debugKnowledgeBase(req, res) {
-        try {
-            const businessId = req.query.business || 'default';
-            const businessData = await businessService.getBusinessConfig(businessId);
-            
-            if (!businessData) {
-                return res.status(404).json({ error: 'Business not found' });
-            }
-
-            res.json({
-                business_id: businessId,
-                business_name: businessData.config.business.name,
-                total_entries: businessData.knowledgeBase.length,
-                entries: businessData.knowledgeBase.map(entry => ({
-                    question: entry.question,
-                    answer: entry.answer.substring(0, 200) + '...',
-                    category: entry.category,
-                    priority: entry.priority
-                })),
-                categories: [...new Set(businessData.knowledgeBase.map(kb => kb.category))]
+            console.error('Chat error:', error);
+            res.status(500).json({ 
+                error: 'Sorry, we encountered an error. Please try again.',
+                details: error.message 
             });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
         }
-    }
+    });
 
-    async testRAG(req, res) {
-        try {
-            const { query } = req.body;
-            const businessId = req.query.business || 'default';
-            
-            if (!query) {
-                return res.status(400).json({ error: 'Query is required' });
-            }
+    // Add a route to get conversation history
+    app.get('/api/history', (req, res) => {
+        const businessId = req.query.business || 'default';
+        const sessionId = `${businessId}_${req.headers['x-session-id'] || 'default'}`;
+        const history = conversationHistory.get(sessionId) || [];
+        res.json({ history });
+    });
 
-            const businessData = await businessService.getBusinessConfig(businessId);
-            if (!businessData) {
-                return res.status(404).json({ error: 'Business not found' });
-            }
-
-            const result = ragService.testRag(query, businessData);
-            res.json(result);
-        } catch (error) {
-            res.status(500).json({ error: error.message });
+    // Add a route to get initial message
+    app.get('/api/initial-message', async (req, res) => {
+        const businessId = req.query.business || 'default';
+        const businessData = await getBusinessConfig(businessId);
+        
+        if (businessData) {
+            res.json({ message: businessData.initialMessage });
+        } else {
+            res.json({ message: "👋 Hello! How can we help you today?" });
         }
-    }
+    });
 
-    async getDebugStats(req, res) {
+    // Endpoint to check if Groq API key is valid
+    app.get('/api/check-api-key', async (req, res) => {
+        if (!GROQ_API_KEY) {
+            return res.json({ valid: false, message: 'No API key provided' });
+        }
+        
         try {
-            const aiStats = aiService.getStats();
-            const dbHealth = await businessService.healthCheck();
-            
-            res.json({
-                server: {
-                    uptime: process.uptime(),
-                    memory: process.memoryUsage(),
-                    node_version: process.version,
-                    environment: appConfig.server.nodeEnv
-                },
-                services: {
-                    ai: aiStats,
-                    database: dbHealth
-                },
-                config: {
-                    max_tokens: appConfig.api.maxTokens,
-                    temperature: appConfig.api.temperature,
-                    cache_ttl: appConfig.cache.ttl
+            const response = await fetch('https://api.groq.com/openai/v1/models', {
+                headers: {
+                    'Authorization': `Bearer ${GROQ_API_KEY}`
                 }
             });
-        } catch (error) {
-            res.status(500).json({ error: error.message });
-        }
-    }
-
-    async clearAllCache(req, res) {
-        try {
-            businessService.clearCache();
-            aiService.clearHistory();
             
-            res.json({
-                message: 'All caches cleared',
-                timestamp: new Date().toISOString()
-            });
+            if (response.ok) {
+                res.json({ valid: true, message: 'API key is valid' });
+            } else {
+                const error = await response.json();
+                res.json({ valid: false, message: error.error?.message || 'Invalid API key' });
+            }
         } catch (error) {
-            res.status(500).json({ error: 'Failed to clear caches' });
+            res.json({ valid: false, message: error.message });
         }
-    }
+    });
 
-    async getActiveSessions(req, res) {
+    // PDF Upload and Processing Endpoints
+    app.post('/api/upload-pdf', upload.single('pdf'), async (req, res) => {
         try {
-            const aiStats = aiService.getStats();
-            
-            res.json({
-                active_sessions: aiStats.active_sessions,
-                timestamp: new Date().toISOString()
-            });
-        } catch (error) {
-            res.status(500).json({ error: 'Failed to get sessions' });
-        }
-    }
-
-    // Start server
-    async start() {
-        try {
-            // Test database connection
-            const dbConnected = await databaseConfig.testConnection();
-            if (!dbConnected) {
-                console.error('❌ Failed to connect to database');
-                process.exit(1);
+            if (!req.file) {
+                return res.status(400).json({ error: 'No PDF file uploaded' });
             }
 
-            const server = this.app.listen(appConfig.server.port, appConfig.server.host, () => {
-                console.log('🚀 Chatbot API Server Started!');
-                console.log(`📍 Server: http://${appConfig.server.host}:${appConfig.server.port}`);
-                console.log(`🌍 Environment: ${appConfig.server.nodeEnv}`);
-                console.log(`🤖 AI Model: ${appConfig.api.groqModel}`);
-                console.log('📚 Available endpoints:');
-                console.log('  - POST /api/chat');
-                console.log('  - GET  /api/health');
-                console.log('  - GET  /api/businesses');
-                console.log('  - GET  /api/debug/knowledge-base');
+            const businessId = req.query.business || 'default';
+            const businessData = await getBusinessConfig(businessId);
+            
+            if (!businessData) {
+                return res.status(404).json({ error: 'Business not found' });
+            }
+            
+            const businessName = businessData.config.business?.name || 'Business';
+            const filePath = req.file.path;
+            
+            console.log(`Processing uploaded PDF for ${businessName}: ${req.file.originalname}`);
+            
+            // Process PDF to knowledge base
+            const newEntries = await processPDFToKnowledgeBase(filePath, businessName);
+            
+            // Update knowledge base
+            const updatedKB = await updateBusinessKnowledgeBase(businessId, newEntries);
+            
+            // Clean up uploaded file
+            fsExtra.remove(filePath);
+            
+            res.json({
+                success: true,
+                message: `PDF processed successfully! Added ${newEntries.length} entries to knowledge base.`,
+                entriesAdded: newEntries.length,
+                totalEntries: updatedKB.length,
+                filename: req.file.originalname
             });
-
-            // Graceful shutdown
-            const gracefulShutdown = async (signal) => {
-                console.log(`\n🛑 Received ${signal}, shutting down gracefully...`);
-                
-                server.close(() => {
-                    console.log('✅ HTTP server closed');
-                    process.exit(0);
-                });
-
-                // Force close after 10 seconds
-                setTimeout(() => {
-                    console.log('❌ Forced shutdown');
-                    process.exit(1);
-                }, 10000);
-            };
-
-            process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-            process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
+            
         } catch (error) {
-            console.error('❌ Failed to start server:', error);
-            process.exit(1);
+            console.error('PDF upload error:', error);
+            
+            // Clean up file if it exists
+            if (req.file && req.file.path) {
+                fsExtra.remove(req.file.path).catch(console.error);
+            }
+            
+            res.status(500).json({
+                error: 'Failed to process PDF',
+                details: error.message
+            });
+        }
+    });
+
+    // Get knowledge base statistics
+    app.get('/api/knowledge-base-stats', async (req, res) => {
+        try {
+            const businessId = req.query.business || 'default';
+            const businessData = await getBusinessConfig(businessId);
+            
+            if (!businessData) {
+                return res.status(404).json({ error: 'Business not found' });
+            }
+            
+            const stats = {
+                totalEntries: businessData.knowledgeBase.length,
+                sources: [...new Set(businessData.knowledgeBase.map(entry => entry.source).filter(Boolean))],
+                lastUpdated: new Date().toISOString()
+            };
+            res.json(stats);
+        } catch (error) {
+            res.status(500).json({ error: 'Failed to get knowledge base stats' });
+        }
+    });
+
+    // Get uploaded files list
+    app.get('/api/uploaded-files', async (req, res) => {
+        try {
+            const businessId = req.query.business || 'default';
+            const uploadsDir = path.join(__dirname, 'businesses', businessId, 'uploads');
+            
+            if (!fs.existsSync(uploadsDir)) {
+                return res.json({ files: [] });
+            }
+            
+            const files = fs.readdirSync(uploadsDir)
+                .filter(file => file.endsWith('.pdf'))
+                .map(file => ({
+                    name: file,
+                    size: fs.statSync(path.join(uploadsDir, file)).size,
+                    uploaded: fs.statSync(path.join(uploadsDir, file)).mtime
+                }));
+            
+            res.json({ files });
+        } catch (error) {
+            res.status(500).json({ error: 'Failed to get uploaded files' });
+        }
+    });
+
+    // List available businesses
+    app.get('/api/businesses', (req, res) => {
+        try {
+            const businessesDir = path.join(__dirname, 'businesses');
+            if (!fs.existsSync(businessesDir)) {
+                return res.json({ businesses: [] });
+            }
+            
+            const businesses = fs.readdirSync(businessesDir)
+                .filter(dir => fs.statSync(path.join(businessesDir, dir)).isDirectory())
+                .filter(dir => fs.existsSync(path.join(businessesDir, dir, 'config.json')))
+                .map(dir => {
+                    try {
+                        const config = JSON.parse(fs.readFileSync(path.join(businessesDir, dir, 'config.json'), 'utf8'));
+                        return {
+                            id: dir,
+                            name: config.business?.name || dir,
+                            type: config.business?.type || 'Business',
+                            location: config.business?.location || ''
+                        };
+                    } catch (e) {
+                        return {
+                            id: dir,
+                            name: dir,
+                            type: 'Unknown',
+                            location: ''
+                        };
+                    }
+                });
+            
+            res.json({ businesses });
+        } catch (error) {
+            res.status(500).json({ error: 'Failed to get businesses list' });
+        }
+    });
+
+    // PDF Processing Functions
+    function chunkText(text, maxChunkSize = 500) {
+        // Split by sentences first
+        const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+        const chunks = [];
+        let currentChunk = '';
+        
+        for (const sentence of sentences) {
+            const sentenceLength = sentence.trim().length;
+            
+            // If adding this sentence would exceed max size, start a new chunk
+            if ((currentChunk + sentence).length > maxChunkSize && currentChunk.length > 0) {
+                chunks.push(currentChunk.trim());
+                // If single sentence is too long, split it by commas or semicolons
+                if (sentenceLength > maxChunkSize) {
+                    const subChunks = sentence.split(/[,;]/).filter(s => s.trim().length > 0);
+                    let subChunk = '';
+                    for (const sub of subChunks) {
+                        if ((subChunk + sub).length > maxChunkSize) {
+                            if (subChunk) chunks.push(subChunk.trim());
+                            subChunk = sub;
+                        } else {
+                            subChunk += (subChunk ? ', ' : '') + sub;
+                        }
+                    }
+                    if (subChunk) currentChunk = subChunk;
+                } else {
+                    currentChunk = sentence;
+                }
+            } else {
+                currentChunk += (currentChunk ? '. ' : '') + sentence;
+            }
+        }
+        
+        if (currentChunk.trim()) {
+            chunks.push(currentChunk.trim());
+        }
+        
+        return chunks;
+    }
+
+    function generateQuestionsFromText(text) {
+        const questions = [];
+        const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 10);
+        
+        // Generate questions based on content
+        sentences.forEach(sentence => {
+            const cleanSentence = sentence.trim();
+            if (cleanSentence.length > 20) {
+                // Create a question from the sentence
+                const question = `What is ${cleanSentence.toLowerCase().replace(/^the\s+/i, '').replace(/^a\s+/i, '').replace(/^an\s+/i, '')}?`;
+                questions.push({
+                    question: question,
+                    answer: cleanSentence
+                });
+            }
+        });
+        
+        return questions;
+    }
+
+    async function processPDFToKnowledgeBase(filePath, businessName = 'Business') {
+        try {
+            console.log(`Processing PDF: ${filePath}`);
+            
+            // Read PDF file
+            const dataBuffer = fs.readFileSync(filePath);
+            const data = await pdfParse(dataBuffer);
+            
+            console.log(`PDF text extracted: ${data.text.length} characters`);
+            
+            // Clean and process text
+            let cleanText = data.text
+                .replace(/\s+/g, ' ')
+                .replace(/\n+/g, ' ')
+                .trim();
+            
+            // Split into chunks
+            const chunks = chunkText(cleanText, 800);
+            console.log(`Created ${chunks.length} text chunks`);
+            
+            // Generate knowledge base entries
+            const newEntries = [];
+            
+            chunks.forEach((chunk, index) => {
+                if (chunk.length > 50) {
+                    // Create a general question about this chunk
+                    const question = `What information is available about ${businessName} in section ${index + 1}?`;
+                    newEntries.push({
+                        question: question,
+                        answer: chunk,
+                        source: path.basename(filePath),
+                        section: index + 1
+                    });
+                    
+                    // Generate specific questions from the chunk
+                    const specificQuestions = generateQuestionsFromText(chunk);
+                    specificQuestions.forEach(q => {
+                        newEntries.push({
+                            question: q.question,
+                            answer: q.answer,
+                            source: path.basename(filePath),
+                            section: index + 1
+                        });
+                    });
+                }
+            });
+            
+            console.log(`Generated ${newEntries.length} knowledge base entries`);
+            return newEntries;
+            
+        } catch (error) {
+            console.error('Error processing PDF:', error);
+            throw error;
         }
     }
+
+    async function updateBusinessKnowledgeBase(businessId, newEntries) {
+        try {
+            const businessDir = path.join(__dirname, 'businesses', businessId);
+            if (!fs.existsSync(businessDir)) {
+                throw new Error(`Business directory not found: ${businessId}`);
+            }
+            
+            // Load existing knowledge base
+            let existingKB = [];
+            const knowledgeBasePath = path.join(businessDir, 'knowledge_base.json');
+            if (fs.existsSync(knowledgeBasePath)) {
+                existingKB = JSON.parse(fs.readFileSync(knowledgeBasePath, 'utf8'));
+            }
+            
+            // Add new entries
+            const updatedKB = [...existingKB, ...newEntries];
+            
+            // Add business-specific knowledge if business config exists
+            const businessData = await getBusinessConfig(businessId);
+            if (businessData && businessData.config.business?.name) {
+                const businessEntries = generateBusinessSpecificEntries(businessData.config);
+                updatedKB.push(...businessEntries);
+            }
+            
+            // Save updated knowledge base
+            fs.writeFileSync(knowledgeBasePath, JSON.stringify(updatedKB, null, 2));
+            
+            // Update cache
+            businessCache.delete(businessId);
+            
+            console.log(`Knowledge base updated for ${businessId} with ${newEntries.length} new entries. Total: ${updatedKB.length}`);
+            return updatedKB;
+            
+        } catch (error) {
+            console.error('Error updating knowledge base:', error);
+            throw error;
+        }
+    }
+
+    function generateBusinessSpecificEntries(businessConfig) {
+        const entries = [];
+        const business = businessConfig.business;
+        const services = businessConfig.services;
+        const contact = businessConfig.contact;
+        
+        // Basic business information
+        entries.push({
+            question: `What is ${business.name}?`,
+            answer: `${business.name} is a ${business.type} specializing in ${business.specialization}. Founded in ${business.founded}, we are a family-owned and operated business serving ${business.location}.`,
+            source: 'business-config',
+            section: 'company-info'
+        });
+        
+        // Services
+        if (services?.primary) {
+            entries.push({
+                question: `What services does ${business.name} offer?`,
+                answer: `We offer the following services: ${services.primary.join(', ')}.`,
+                source: 'business-config',
+                section: 'services'
+            });
+        }
+        
+        // Contact information
+        if (contact) {
+            entries.push({
+                question: `How can I contact ${business.name}?`,
+                answer: `You can reach us at ${contact.phone} or email us at ${contact.email}. Our address is ${contact.address}.`,
+                source: 'business-config',
+                section: 'contact'
+            });
+            
+            entries.push({
+                question: `What are ${business.name}'s operating hours?`,
+                answer: `Our operating hours are: ${contact.hours}.`,
+                source: 'business-config',
+                section: 'contact'
+            });
+        }
+        
+        // Service areas
+        if (businessConfig.service_areas) {
+            entries.push({
+                question: `What areas does ${business.name} service?`,
+                answer: `We service the following areas: ${businessConfig.service_areas.join(', ')}.`,
+                source: 'business-config',
+                section: 'service-areas'
+            });
+        }
+        
+        // Certifications
+        if (businessConfig.certifications) {
+            entries.push({
+                question: `What certifications does ${business.name} have?`,
+                answer: `We are certified by: ${businessConfig.certifications.join(', ')}.`,
+                source: 'business-config',
+                section: 'certifications'
+            });
+        }
+        
+        return entries;
+    }
+
+    // Start the server
+    const HOST = process.env.HOST || '0.0.0.0';
+    app.listen(PORT, HOST, () => {
+        console.log(`🚀 Server running on http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
+        
+        // Get local IP address for mobile access
+        const { networkInterfaces } = require('os');
+        const nets = networkInterfaces();
+        let localIp = '127.0.0.1';
+        
+        // Find a non-internal IPv4 address
+        for (const name of Object.keys(nets)) {
+            for (const net of nets[name]) {
+                if (net.family === 'IPv4' && !net.internal) {
+                    localIp = net.address;
+                    break;
+                }
+            }
+        }
+        
+        console.log(`📱 Access on your phone at http://${localIp}:${PORT}`);
+        console.log(`🌐 Server bound to ${HOST}:${PORT}`);
+        console.log('✅ Multi-tenant Chatbot SaaS is ready!');
+        console.log('💬 Using Groq API with rule-based fallback');
+    });
 }
 
-// Start server if this file is run directly
-if (require.main === module) {
-    const server = new ChatbotServer();
-    server.start();
-}
+// Handle graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('Server shutting down gracefully...');
+    process.exit(0);
+});
 
-module.exports = ChatbotServer;
+startServer();

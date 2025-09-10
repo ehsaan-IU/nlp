@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Chatbot Widget Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            margin: 0;
+        }
+        .test-info {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.1);
+            max-width: 800px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .test-info h1 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 28px;
+        }
+        .test-info p {
+            color: #666;
+            line-height: 1.6;
+            margin-bottom: 15px;
+        }
+        .feature-list {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        .feature-list h3 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .feature-list ul {
+            color: #666;
+            line-height: 1.8;
+        }
+        .feature-list li {
+            margin-bottom: 8px;
+        }
+        .test-buttons {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        .test-button {
+            padding: 12px 24px;
+            background: #ad7133;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        .test-button:hover {
+            background: #bd8d5b;
+            transform: translateY(-2px);
+        }
+    </style>
+</head>
+<body>
+    <div class="test-info">
+        <h1>🚀 Enhanced Chatbot Widget Test</h1>
+        <p>This page tests the new improved chatbot widget with enhanced UI/UX features.</p>
+        <p>Look for the chat button in the bottom-right corner to see all the improvements!</p>
+        
+        <div class="feature-list">
+            <h3>✨ New Features to Test:</h3>
+            <ul>
+                <li><strong>🎨 Modern Design:</strong> Clean, professional interface with smooth animations</li>
+                <li><strong>⏰ Timestamps:</strong> Hover over messages to see timestamps</li>
+                <li><strong>📱 Responsive:</strong> Works perfectly on mobile and desktop</li>
+                <li><strong>🔄 Smooth Animations:</strong> Expand/collapse, message slide-in effects</li>
+                <li><strong>📝 Auto-expanding Input:</strong> Textarea grows with your content</li>
+                <li><strong>🎪 Visual Polish:</strong> Shadows, gradients, and modern styling</li>
+                <li><strong>♿ Accessibility:</strong> Proper focus states and keyboard navigation</li>
+                <li><strong>🛡️ Error Handling:</strong> User-friendly error messages</li>
+            </ul>
+        </div>
+        
+        <div class="test-buttons">
+            <button class="test-button" onclick="window.ChatbotWidget.open()">Open Chat</button>
+            <button class="test-button" onclick="window.ChatbotWidget.close()">Close Chat</button>
+            <button class="test-button" onclick="window.ChatbotWidget.toggle()">Toggle Chat</button>
+        </div>
+    </div>
+
+    <!-- Include the new improved widget -->
+    <script src="public/chatbot-widget.js" 
+            data-business-id="mac-organic" 
+            data-position="bottom-right" 
+            data-color="#ad7133"
+            data-api-url="http://localhost:3000">
+    </script>
+</body>
+</html> 

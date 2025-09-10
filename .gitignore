@@ -19,8 +19,3 @@ build/
 .DS_Store
 .vscode/
 *.log 
-
-package-lock.json
-
-.wwebjs_cache/
-whatsapp-sessions/

@@ -1,4 +1,4 @@
-# Yako Chatbot
+# Chatbot
 
 A simple, efficient AI chatbot built with Node.js and Express, featuring:
 
